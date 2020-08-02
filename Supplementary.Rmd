@@ -1,0 +1,535 @@
+---
+title: "STA_160_Final_Proejct"
+author: "Ryan Smith"
+date: "5/16/2020"
+output: html_document
+---
+```{r, message = F, warning = F, error = F}
+library(tidyverse)
+library(corrgram)
+library(nnet)
+library(class)
+library(plotly)
+library(corrplot)
+library(RColorBrewer)
+library(ggplot2)
+library(boot)
+library(lattice)
+library(MASS)
+library(devtools)
+#install_github("vqv/ggbiplot")
+library(ggbiplot)
+library(useful)
+library(randomForest)
+require(caTools)
+library(cluster)    # clustering algorithms
+library(factoextra) # clustering visualization
+library(dendextend) # for comparing two dendrograms
+library(rsample)
+library(kernlab)
+library(keras)
+library(reticulate)
+library(boot)
+library(bench)
+library(ape)
+library(stats)
+```
+
+
+##Loading data
+```{r}
+train <- read.csv("~/Desktop/School/STA 160/STA_160_Final_project/R/train.csv")
+#View(train)
+
+
+unique_m <- read.csv("~/Desktop/School/STA 160/STA_160_Final_project/R/unique_m.csv")
+#View(unique_m)
+```
+
+
+
+####70/30 train/test data split.
+```{r}
+n = nrow(train)
+tr = sample(1:n, 0.7 * n, replace=FALSE)
+te = setdiff(1:n,tr)
+train_data <- train[tr,]
+test_data <- train[te,]
+```
+
+
+
+################
+###############Exploratory Data Analyysis
+################
+
+###TRAIN DATASET
+```{r}
+###Figuring out the correlogram. Can't fit all vars.
+correlogram_reduced_dataset <- train %>% dplyr::select(number_of_elements, critical_temp,  mean_atomic_mass, mean_fie, mean_atomic_radius, mean_Density, mean_ElectronAffinity, mean_FusionHeat, mean_ThermalConductivity, mean_Valence)
+
+#colnames(correlogram_reduced_dataset) <- c('crit_temp','n_ele',  'm_AMass', 'm_Fie', 'm_ARadius', 'm_Density', 'm_EAffinity', 'm_FHeat', 'm_TConduct', 'm_Valence')
+
+corrgram(correlogram_reduced_dataset, upper.panel = panel.pie, labels = c('crit_temp','n_ele',  'm_AMass', 'm_Fie', 'm_ARadius', 'm_Density', 'm_EAffinity', 'm_FHeat', 'm_TConduct', 'm_Valence'), main = "Correlogram of Twelve Varibles from Train")
+cor(correlogram_reduced_dataset)
+
+
+####CORR of all...
+corrs <- as.data.frame(cor(train)) %>% pull(critical_temp)
+temp <- tibble(corrs, colnames(train))
+corrs <- temp[order(temp$corrs),]
+corrs_inv <- temp[order(temp$corrs, decreasing = T),]
+
+##Means of data...
+colMeans(train)
+colMeans(unique_m[1:(ncol(unique_m)-1)])
+
+#corrgram(train, upper.panel = panel.pie)
+#corrgram(unique_m,upper.panel = panel.pie)
+
+hist(train$mean_Density)
+hist(train$critical_temp)
+
+cor(train$mean_atomic_mass, train$number_of_elements)
+corrgram(train[,1:5], upper.panel = panel.pie)
+
+
+hist(train$critical_temp, main = 'Histogram of Critical Temperature')
+
+plot_ly(x = train$critical_temp, type = "histogram") %>% layout( title = 'Histogram of Critical Temperatures')
+
+####unique_m dataset
+test1 <- unique_m[-88]
+means1 <- colMeans(test1)
+test1 <- test1[,-c(2,10,18,36,54,61,84,85,86)]
+corrs1 <- cor(test1)
+corrs1 <- as.data.frame(abs(cor(test1))) %>% pull(critical_temp)
+temp <- tibble(corrs1, colnames(test1))
+corrs1_order <- temp[order(corrs1, decreasing = T),]
+
+
+corr_unique_m <- test1 %>% dplyr::select(O, Ba,Cu, Ca, Sr, Y, Hg, Ti,critical_temp)
+corrgram(corr_unique_m, upper.panel = panel.pie)
+```
+
+
+https://uc-r.github.io/hc_clustering
+####
+```{r}
+
+df <- train
+df_small <- df[1:1000,]
+df_small <- data.frame(t(df_small[]))
+df_small <- scale(df_small)
+
+
+# Dissimilarity matrix
+d <- dist(df_small, method = "euclidean")
+
+# Hierarchical clustering using Complete Linkage
+hc1 <- hclust(d, method = "complete" )
+
+# Plot the obtained dendrogram
+plot(hc1, cex = 0.6, hang = -1)
+
+clusterCut <- cutree(hc1, 10)
+
+
+
+####
+hc3 <- agnes(df_small, method = "ward")
+pltree(hc3, cex = 0.6, hang = -1, main = "Dendrogram of Train dataset") 
+
+d_red <- t(correlogram_reduced_dataset)
+d_red <- dist(d, method = 'euclidean')
+hc_red <- hclust(d_red, method = 'complete')
+plot(hc_red, cex = 0.6, hang = -1)
+```
+
+
+
+
+
+
+```{r}
+###What element effects critical temperature the most?
+fit <- lm(critical_temp ~ ., train)
+summary(fit)
+
+plot(y = train$critical_temp, x = train$mean_atomic_mass + train$mean_atomic_radius + train$mean_fie)
+
+#plot(critical_temp ~ ., data = train)
+#abline(fit1)
+```
+
+
+
+###Dealing with multicollinearity
+```{r}
+##Removing columns with correlation greater than .8
+cors <- cor(train)
+temp <- dplyr::select(train, -entropy_atomic_mass)
+```
+
+
+
+
+###Classification to predict number of elements
+```{r}
+comparison100 <- vector()
+for (i in 1:100){
+#### 70/30 training vs testing data split
+n = nrow(train)
+tr = sample(1:n, 0.7 * n, replace=FALSE)
+te = setdiff(1:n,tr)
+
+data.tr = train[tr,c(1:8)]
+data.te = train[te,c(1:8)]
+
+
+#Want to predict The number of elements of a ....... with classification.
+
+### LDA
+
+train.lda = lda(number_of_elements ~ ., data.tr)
+
+train.pred.lda = predict(train.lda,grouping = type,  data.te)
+train.confusion.lda = table(true = data.te$number_of_elements, predicted = train.pred.lda$class)
+
+train.pred.lda_error = sum(diag(train.confusion.lda)) / sum(train.confusion.lda)
+
+comparison100 <- append(comparison100, train.pred.lda_error)
+###Using Linear Discriminant Analysis, I fit a model based on the training data and applied it to the testing data.
+### I was able to predict the  98.22935% accuracy.
+}
+mean(comparison100)
+
+```
+
+
+
+
+#####################
+#########
+##Predicting critical temperature.
+```{r}
+linear_pred_errors <- vector()
+temp_rf_RMSE <- vector()
+for (i in 1:100){
+###Splitting the data into 70/30 test/train split
+n = nrow(train)
+tr = sample(1:n, 0.7 * n, replace=FALSE)
+te = setdiff(1:n,tr)
+
+train.tr = train[tr,]
+train.te = train[te,]
+
+###Predicting the critical temperature of a superconductor
+
+#I predict the critical tmeperature of a superconductor with a linear model 
+f <- reformulate(setdiff(colnames(train), "critical_temp"), response="critical_temp")
+train_fit <- lm(f, data = train.tr)
+train_temp_predict <- predict(object = train_fit, newdata = train.te)
+
+train_temp_lm_MSE <- (1/ length(train.te$critical_temp)) * sum((as.numeric(train.te$critical_temp) - as.numeric(train_temp_predict)) ^ 2)
+train_temp_lm_RMSE <- sqrt(train_temp_lm_MSE)
+#The RMSE is 17.622
+
+linear_pred_errors <- append(linear_pred_errors, train_temp_lm_RMSE)
+
+
+##The average RMSE after 100 runs was 17.62599
+
+}
+
+mean(linear_pred_errors)
+
+summary(train_fit)
+
+
+####PLOTTING
+
+num <- 1:6379
+predicted <- data.frame(pred = train_temp_predict, num)
+real <- data.frame(real = train.te$critical_temp, num)
+
+plot(x = num, y = data1$pred,col="blue")
+
+test123 <- data.frame(x = num, pred = train_temp_predict, real = train.te$critical)
+
+fig <- plot_ly(test123, x = ~x, y = ~pred, name = 'predicted', type = 'scatter', mode = 'lines') 
+fig <- fig %>% add_trace(y = ~real, name = 'real', mode = 'lines+markers') 
+
+
+fig
+```
+
+
+#############NOW RANDOM FOREST TO PRED CRIT TEMP
+```{r}
+n = nrow(train)
+tr = sample(1:n, 0.7 * n, replace=FALSE)
+te = setdiff(1:n,tr)
+
+train.tr = train[tr,]
+train.te = train[te,]
+
+##Only doing mean of each of the measurements. otherwise too many dims.
+train.tr_red = train.tr[,c(1,2,12,22,32,42,52,62,72,82)]
+train.te_red = train.te[,c(1,2,12,22,32,42,52,62,72,82)]
+
+rf <- randomForest(
+  critical_temp ~.,
+  data = train.tr_red
+)
+#print(importance(rf))
+#print(sort(importance(rf)))
+pred <- predict(rf, newdata = train.te_red[-10])
+
+
+train_rf_MSE <- (1/ length(train.te_red$critical_temp)) * sum((as.numeric(train.te_red$critical_temp) - as.numeric(pred)) ^ 2)
+rf_crit_temp_RMSE <- sqrt(train_rf_MSE)
+rf_crit_temp_RMSE
+
+### WHEN I did 3x, i got: 13.469, 13.469, 13.446, so the data set is large enough to not need repeats. takes forever.
+
+
+##The most important variables in determining critical tmep are mean_Valence, number of elements, and mean thermal conductivity
+```
+
+
+###########LDA
+```{r}
+LDA <- lda(critical_temp ~ ., train_data)
+LDA_pred <- predict(LDA, newdata = test_data)
+
+LDA_MSE <- (1/ length(test_data$critical_temp)) * sum((test_data$critical_temp - as.numeric(levels(LDA_pred$class))[LDA_pred$class]) ^ 2)
+LDA_crit_temp_RMSE <- sqrt(LDA_MSE)
+LDA_crit_temp_RMSE
+######RMSE 17.39181
+```
+
+
+####PCA
+```{r}
+both <- data.frame(train[-82], unique_m[,-(c(2,10,36,54,18,84,85,86,2,61,88))])
+train.pca <- prcomp(both, center = T, scale = T)
+summary(train.pca)
+## You can reduce the 82  dimensions down to 7 and retain 79.87% of the original variance
+
+
+##biplot for PC1 and PC2 which explain 49.39% of the original variance
+ggbiplot::ggbiplot(train.pca)
+
+##biplot for PC3 and PC4 which explain 15.192% of the original variance
+ggbiplot::ggbiplot(train.pca,choices=c(3,4))
+```
+
+
+
+
+
+##############CLASSIFICATION of CRIT_TEMP
+
+```{r}
+class <- ifelse(train$critical_temp < 30 , 0 , 
+          ifelse(train$critical_temp < 60, 1,
+          ifelse(train$critical_temp < 90, 2,
+          3)))
+          
+class_data <- train[,-82]
+class_data <- data.frame(class_data, class)
+```
+
+#########TEST 10 classes
+#######KERAS FROM 141C
+```{r, message = F, warning = F, error = F}
+# S3 method for keras.engine.training.Model
+x_train <- as.matrix(class_data[tr,-82])
+x_test <- as.matrix(class_data[te,-82])
+
+y_test = class_data[te,82]
+
+y_train = class_data[tr, 82]
+y_train = to_categorical(y_train, num_classes = 4)
+
+
+model <- keras_model_sequential() %>%
+  layer_dense(units = 2056, activation = "relu",input_shape = 81) %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 1024, activation = "relu") %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 4, activation = 'softmax')
+summary(model)
+
+model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_adam(),
+  metrics = c("accuracy")
+)
+
+fit <- model %>% fit(
+  x_train,
+  y_train,
+  epochs = 30,
+  batch_size = 100,
+  validation_split = 0.3
+)
+plot(fit)
+
+pred = predict_classes(model, x_test)
+table <- table(pred, y_test)
+error <- (table[1,1] + table[2,2]) / sum(table)
+error
+correct <- (table[1,2] + table[2,1]) / sum(table)
+
+###Can classify whether the critical temp is high(above) or low(below) 10 with a accuracy of 62.56%.
+
+```
+
+
+
+
+
+
+
+
+####################Combining both datasets.
+
+```{r}
+data_full <- data.frame(train[,-82], unique_m[-88])
+colMeans(data_full)
+
+###REMOVE He, Ne, Kr, Xe, Po, Rn, At, Pm since they all have no occurences.
+data_full <- data.frame(train[-82], unique_m[,-(c(2,10,36,54,18,84,85,86,2,61,88))])
+colMeans(data_full)
+
+cor_full <- cor(data_full)
+critical_temp_cor <- data.frame(cor_full[,159], colnames(data_full)) 
+colnames(critical_temp_cor) <- c('cor', 'name')
+low_cor <- (abs(critical_temp_cor$cor) < .1)
+
+###REMOVING columns with less than 0.2 correlation with critical_temp
+data_full_reduced <- data_full[,abs(critical_temp_cor$cor) > .2]
+
+
+###REMOVEING VARS WITH >0.95 corr with eachother
+c <- cor(data_full_reduced)
+data_full_reduced <- data_full_reduced[,-c(5,2,9,12,15,21,22)]
+```
+
+
+####PREDICTING Critical temp with cleaned data
+```{r}
+linear_pred_errors <- vector()
+temp_rf_RMSE <- vector()
+for (i in 1:100){
+###Splitting the data into 70/30 test/train split
+n = nrow(data_full_reduced)
+tr = sample(1:n, 0.7 * n, replace=FALSE)
+te = setdiff(1:n,tr)
+
+train.tr = data_full_reduced[tr,]
+train.te = data_full_reduced[te,]
+
+###Predicting the critical temperature of a superconductor
+
+#I predict the critical tmeperature of a superconductor with a linear model 
+f <- reformulate(setdiff(colnames(train.tr), "critical_temp"), response="critical_temp")
+train_fit <- lm(f, data = train.tr)
+#anova(car_lda)
+train_temp_predict <- predict(object = train_fit, newdata = train.te)
+
+train_temp_lm_MSE <- (1/ length(train.te$critical_temp)) * sum((as.numeric(train.te$critical_temp) - as.numeric(train_temp_predict)) ^ 2)
+train_temp_lm_RMSE <- sqrt(train_temp_lm_MSE)
+#The RMSE is 17.622
+
+linear_pred_errors <- append(linear_pred_errors, train_temp_lm_RMSE)
+
+
+##The average RMSE after 100 runs was 17.62599
+
+}
+
+mean(linear_pred_errors)
+
+##Avergae RMSE after 100 runs is 18.2
+```
+
+###########LDA ON CLEAN DATA
+```{r}
+LDA <- lda(critical_temp ~ ., train.tr)
+LDA_pred <- predict(LDA, newdata = train.te)
+
+LDA_MSE <- (1/ length(train.te$critical_temp)) * sum((train.te$critical_temp - as.numeric(levels(LDA_pred$class))[LDA_pred$class]) ^ 2)
+LDA_crit_temp_RMSE <- sqrt(LDA_MSE)
+LDA_crit_temp_RMSE
+######RMSE 17.0283
+```
+
+
+
+
+```{r}
+
+n = nrow(data_full_reduced)
+tr = sample(1:n, 0.7 * n, replace=FALSE)
+te = setdiff(1:n,tr)
+
+train.tr = data_full_reduced[tr,]
+train.te = data_full_reduced[te,]
+
+###RANDOM FOREST
+
+#Cleaned data
+train.tr_red = train.tr
+train.te_red = train.te
+
+rf <- randomForest(
+  critical_temp ~.,
+  data = train.tr_red
+)
+#print(importance(rf))
+#print(sort(importance(rf)))
+pred <- predict(rf, newdata = train.te_red[-67])
+
+
+train_rf_MSE <- (1/ length(train.te_red$critical_temp)) * sum((as.numeric(train.te_red$critical_temp) - as.numeric(pred)) ^ 2)
+rf_crit_temp_RMSE <- sqrt(train_rf_MSE)
+rf_crit_temp_RMSE
+
+
+
+library(rfUtilities)
+rf.crossValidation(rf, train.te_red[,-67], ydata = train.te_red[,67], p = 0.1, n = 5)
+
+####Predicted Critical_temp with random forest, 30 vars with an RMSE of 9.224753
+####Verfifies the RMSE by performing cross validation with 5 splits, and got a Median cross-validation RMSE of 9.95523
+```
+
+
+
+```{r}
+###Benchmarking the time requied
+bench::mark(
+
+
+
+
+train_fit <- lm(f, data = train.tr)
+
+
+
+  
+)
+
+```
+####TIMES:::   RF-209s, 1.09 GB memory      , LM ---  82ms, 35mb memory  , NN -    ,   
+
+
+```{r}
+
+```
+
+
+
